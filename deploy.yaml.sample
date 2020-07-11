@@ -1,0 +1,10 @@
+namespace: prod
+deploy:
+  back-end-app:
+    script: deploy-backend.sh
+    package: backend-api.tar
+    skip: true
+  front-end-app:
+    script: deploy-ui.sh
+    package: front-end.tar
+    skip: false
