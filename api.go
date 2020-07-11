@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -65,8 +67,7 @@ func (api *Api) init(listen string, apiData *ApiDataCtx) *http.Server {
 	r := api.R.PathPrefix("/api/v1").Subrouter()
 	r.Use(mwApiDataCtxFactor(apiData))
 	r.HandleFunc("/deploy", api.deploy).Methods(http.MethodPost)
-	r.HandleFunc("/status", api.getInfo).Methods(http.MethodGet)
-
+	r.HandleFunc("/status/{namespaceSession}", api.getInfo).Methods(http.MethodGet)
 	return srv
 
 }
@@ -114,11 +115,104 @@ func (*Api) deploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go executeTask(newSessionID, yamlObj, ctx)
-	w.Write([]byte("OK"))
+
+	namespace := yamlObj.Namespace
+	if len(yamlObj.Namespace) == 0 {
+		namespace = fallbackDeploymentNamespace
+	}
+	w.Write([]byte(fmt.Sprintf("%s-%s", namespace, sessionID)))
 }
 
 func (*Api) getInfo(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("OK"))
+	routerVars := mux.Vars(r)
+	namespaceSession := routerVars["namespaceSession"]
+	r.URL.Query().Get("")
+	ctx := apiHelperGetApiDataCtx(r)
+	strs := strings.Split(namespaceSession, "-")
+	str1 := ""
+	if len(strs) > 1 {
+		str1 = strs[1]
+	}
+	if str1 == "" {
+		entries, err := listLogFile(ctx, strs[0])
+		if err != nil {
+			httpError(w, 500, "Can not read status", err)
+			return
+		}
+		for _, entry := range entries {
+			io.WriteString(w, fmt.Sprintf("%s \t %s\n", entry.Name, entry.Created))
+		}
+		return
+	}
+
+	fcontent, err := readLogFile(ctx, strs[0], str1)
+	if err != nil {
+		httpError(w, 500, "Can not read status", err)
+		return
+	}
+	w.Header().Add("Content-Type", "text/plain")
+	w.Write(fcontent)
+}
+
+func readLogFile(ctx *ApiDataCtx, namespace string, session string) ([]byte, error) {
+	logPath := ctx.LogPath
+	if filepath.IsAbs(logPath) {
+		logPath = filepath.Join(currentExecutablePath(), logPath)
+	}
+	f := filepath.Join(logPath, fmt.Sprintf("%s-%s.log", namespace, session))
+	if _, err := os.Stat(f); os.IsNotExist(err) {
+		return nil, err
+	}
+	return ioutil.ReadFile(f)
+}
+
+type fileEntry struct {
+	Name    string
+	Created time.Time
+}
+type fileEntries []fileEntry
+
+func (t fileEntries) Len() int {
+	return len(t)
+}
+func (t fileEntries) Swap(i, j int) {
+	t[i], t[j] = t[j], t[i]
+}
+func (t fileEntries) Less(i, j int) bool {
+	return t[i].Created.Before(t[j].Created)
+}
+
+func listLogFile(ctx *ApiDataCtx, namespace string) (fileEntries, error) {
+	logPath := ctx.LogPath
+	if !filepath.IsAbs(logPath) {
+		logPath = filepath.Join(currentExecutablePath(), logPath)
+	}
+	dir, err := os.Open(logPath)
+	if err != nil {
+		return nil, err
+	}
+	fileInfos, err := dir.Readdir(0)
+	if err != nil {
+		return nil, err
+	}
+	entries := fileEntries{}
+	pattern, _ := regexp.Compile(fmt.Sprintf("^%s-\\w+\\.log$", namespace))
+	for _, info := range fileInfos {
+		if info.IsDir() {
+			continue
+		}
+		name := info.Name()
+		if !pattern.MatchString(name) {
+			continue
+		}
+		created := info.ModTime().UTC().Round(time.Second)
+		entries = append(entries, fileEntry{
+			Name:    strings.TrimSuffix(name, filepath.Ext(name)),
+			Created: created,
+		})
+	}
+	sort.Sort(sort.Reverse(entries))
+	return entries, nil
 }
 
 func apiHelperGetApiDataCtx(r *http.Request) *ApiDataCtx {
