@@ -25,5 +25,53 @@ Anti Feature:
 - not necessily do new build on server side (though can do build in the script). Why do I always need so for javascript project? would mac make difference from linux?
 
 
-TODO:
-- implement the status api
+Usage
+- 1. use cURL to trigger a deployment
+(before triggering the deployment, scp the deploy-pkg.tar to a user folder e.g. /home/user/deploy-lite-pkgs/)
+
+- 2. 
+```
+curl -v localhost:8080/api/v1/deploy -H "Content-Type:text/x-yaml" --data-binary @deploy.yaml 
+```
+( to reserve newline for yaml, use --data-binary)
+The content of yaml
+```
+namespace: prod
+authToken: some-secret-token
+deploy:
+  back-end-app:
+    script: deploy-backend.sh
+    package: backend-api.tar
+    skip: true
+  front-end-app:
+    script: deploy-ui.sh
+    package: frequency-agenda.tar
+    skip: false
+```
+The return is the %namespace%-%sessionid% -- need this to get the status of the deployment.
+- 3 namespace and status api
+
+Choose a namespace e.g. 'prod', so you can get all deployment logs using 
+```
+curl localhost:8080/api/v1/status/prod
+```
+this will list all log names with timestamp, ordered by descendent of timestemp
+like
+```
+prod-1234132543123213                      2020-07-15 14:23  UTC    
+```
+the number followed by 'prod-' is also returned by step 2's sessionID
+
+get status of a deployment
+
+```
+curl localhost:8080/api/v1/status/prod-1234132543123213
+```
+
+- 4 the sessionID
+it is the unix time in nano sec, for each namespace, this is likely unique enough and sequencial.
+
+- 5 feature added to prevent double submit
+Within two minutes, you can't submit the same yaml for the same namespace. Since script is running asynchronously, this is not 100% safe way to prevent. But for hobbies home server, this is good enough to prevent double trigger.
+
+
