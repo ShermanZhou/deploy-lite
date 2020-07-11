@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -17,7 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	_ "sync/atomic"
 	"time"
 
@@ -50,10 +52,17 @@ type DeployYAML struct {
 }
 
 var apiDataCtxKey AppValueCtxKey = "apiDataCtxKey"
-var sessionID int64 = 10000
 var yamlHttpHeader = "text/x-yaml"
 var fallbackDeploymentNamespace = "namespace"
+var deployMixInterval = time.Minute * 2
 var tokenFileChan = make(chan bool, 1)
+
+type deployTaskPoolItem struct {
+	TaskHash string
+	Time     string // unix second
+}
+
+var deployTaskPool = sync.Map{}
 
 func (api *Api) init(listen string, apiData *ApiDataCtx) *http.Server {
 	api.R = mux.NewRouter()
@@ -90,7 +99,7 @@ func (*Api) deploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newSessionID := atomic.AddInt64(&sessionID, 1)
+	newSessionID := time.Now().UnixNano()
 	ctx := apiHelperGetApiDataCtx(r)
 	yamlObj, err := parseDeployYaml(r.Body)
 	defer r.Body.Close()
@@ -114,13 +123,39 @@ func (*Api) deploy(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, fmt.Sprintf("Parse deployment yaml Error.\n sample yaml: \n%s\n", string(sampleStr)), err)
 		return
 	}
+	// prevent same deploy trigger using yaml:
+	// won't be err, object parse back
+	yamlBytes, _ := yaml.Marshal(yamlObj)
+	hashOfYaml := base64.StdEncoding.EncodeToString(getBinaryHash(yamlBytes))
+	if result, ok := deployTaskPool.Load(hashOfYaml); ok {
+		timeStr := result.(string)
+		createdtime, _ := time.Parse(time.RFC3339, string(timeStr))
+		if createdtime.Sub(time.Now()) < deployMixInterval {
+			httpError(w, 500, "Same deployment has already started", nil)
+			return
+		}
+	}
+	deployTaskPool.Store(hashOfYaml, time.Now().Format(time.RFC3339))
+	// delete after minInterval
+	ticker := time.NewTicker(deployMixInterval + 2*time.Minute)
+	go func(key string) {
+		<-ticker.C
+		deployTaskPool.Delete(key)
+	}(hashOfYaml)
+
 	go executeTask(newSessionID, yamlObj, ctx)
 
 	namespace := yamlObj.Namespace
 	if len(yamlObj.Namespace) == 0 {
 		namespace = fallbackDeploymentNamespace
 	}
-	w.Write([]byte(fmt.Sprintf("%s-%s", namespace, sessionID)))
+	io.WriteString(w, fmt.Sprintf("%s-%d", namespace, newSessionID))
+}
+
+func getBinaryHash(bytes []byte) []byte {
+	hasher := sha256.New()
+	hasher.Write(bytes)
+	return hasher.Sum(nil)
 }
 
 func (*Api) getInfo(w http.ResponseWriter, r *http.Request) {
