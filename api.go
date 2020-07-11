@@ -166,7 +166,7 @@ func executeTask(sessionID int64, yamlObject DeployYAML, ctx *ApiDataCtx) {
 		return
 	}
 
-	tokens, err := readTokenFile(yamlObject.AuthToken)
+	tokens, err := readTokenFile(ctx.TokenFile)
 	if err != nil {
 		taskErrLog.Printf("Read token file failed %s \n", err.Error())
 		return
@@ -190,6 +190,7 @@ func executeTask(sessionID int64, yamlObject DeployYAML, ctx *ApiDataCtx) {
 
 	for k, pkg := range yamlObject.Deploy {
 		if pkg.Skip {
+			taskInfoLog.Printf("Skip task %s \n", k)
 			continue
 		}
 		// todo: namespace validation and authorization

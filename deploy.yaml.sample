@@ -1,4 +1,5 @@
 namespace: prod
+authToken: 1234123251325321321AAAAAAgfdsafds
 deploy:
   back-end-app:
     script: deploy-backend.sh
