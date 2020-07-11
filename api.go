@@ -1,26 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"net/http"
-	"os"
-	"os/exec"
-	"path"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	_ "sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -55,7 +44,6 @@ var apiDataCtxKey AppValueCtxKey = "apiDataCtxKey"
 var yamlHttpHeader = "text/x-yaml"
 var fallbackDeploymentNamespace = "namespace"
 var deployMixInterval = time.Minute * 2
-var tokenFileChan = make(chan bool, 1)
 
 type deployTaskPoolItem struct {
 	TaskHash string
@@ -92,7 +80,6 @@ func mwApiDataCtxFactor(apiDataCtx *ApiDataCtx) mux.MiddlewareFunc {
 }
 
 func (*Api) deploy(w http.ResponseWriter, r *http.Request) {
-
 	contentType := r.Header.Get("Content-Type")
 	if contentType != yamlHttpHeader {
 		httpError(w, 500, "Requires Content-Type to be "+yamlHttpHeader, errors.New(""))
@@ -101,7 +88,7 @@ func (*Api) deploy(w http.ResponseWriter, r *http.Request) {
 
 	newSessionID := time.Now().UnixNano()
 	ctx := apiHelperGetApiDataCtx(r)
-	yamlObj, err := parseDeployYaml(r.Body)
+	yamlObj, err := Deploy{}.parseYaml(r.Body)
 	defer r.Body.Close()
 
 	if err != nil || yamlObj.Deploy == nil {
@@ -143,7 +130,7 @@ func (*Api) deploy(w http.ResponseWriter, r *http.Request) {
 		deployTaskPool.Delete(key)
 	}(hashOfYaml)
 
-	go executeTask(newSessionID, yamlObj, ctx)
+	go Deploy{}.excTask(newSessionID, yamlObj, ctx)
 
 	namespace := yamlObj.Namespace
 	if len(yamlObj.Namespace) == 0 {
@@ -169,7 +156,7 @@ func (*Api) getInfo(w http.ResponseWriter, r *http.Request) {
 		str1 = strs[1]
 	}
 	if str1 == "" {
-		entries, err := listLogFile(ctx, strs[0])
+		entries, err := fileUtl{}.listLogFile(ctx, strs[0])
 		if err != nil {
 			httpError(w, 500, "Can not read status", err)
 			return
@@ -180,74 +167,13 @@ func (*Api) getInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fcontent, err := readLogFile(ctx, strs[0], str1)
+	fcontent, err := fileUtl{}.readLogFile(ctx, strs[0], str1)
 	if err != nil {
 		httpError(w, 500, "Can not read status", err)
 		return
 	}
 	w.Header().Add("Content-Type", "text/plain")
 	w.Write(fcontent)
-}
-
-func readLogFile(ctx *ApiDataCtx, namespace string, session string) ([]byte, error) {
-	logPath := ctx.LogPath
-	if filepath.IsAbs(logPath) {
-		logPath = filepath.Join(currentExecutablePath(), logPath)
-	}
-	f := filepath.Join(logPath, fmt.Sprintf("%s-%s.log", namespace, session))
-	if _, err := os.Stat(f); os.IsNotExist(err) {
-		return nil, err
-	}
-	return ioutil.ReadFile(f)
-}
-
-type fileEntry struct {
-	Name    string
-	Created time.Time
-}
-type fileEntries []fileEntry
-
-func (t fileEntries) Len() int {
-	return len(t)
-}
-func (t fileEntries) Swap(i, j int) {
-	t[i], t[j] = t[j], t[i]
-}
-func (t fileEntries) Less(i, j int) bool {
-	return t[i].Created.Before(t[j].Created)
-}
-
-func listLogFile(ctx *ApiDataCtx, namespace string) (fileEntries, error) {
-	logPath := ctx.LogPath
-	if !filepath.IsAbs(logPath) {
-		logPath = filepath.Join(currentExecutablePath(), logPath)
-	}
-	dir, err := os.Open(logPath)
-	if err != nil {
-		return nil, err
-	}
-	fileInfos, err := dir.Readdir(0)
-	if err != nil {
-		return nil, err
-	}
-	entries := fileEntries{}
-	pattern, _ := regexp.Compile(fmt.Sprintf("^%s-\\w+\\.log$", namespace))
-	for _, info := range fileInfos {
-		if info.IsDir() {
-			continue
-		}
-		name := info.Name()
-		if !pattern.MatchString(name) {
-			continue
-		}
-		created := info.ModTime().UTC().Round(time.Second)
-		entries = append(entries, fileEntry{
-			Name:    strings.TrimSuffix(name, filepath.Ext(name)),
-			Created: created,
-		})
-	}
-	sort.Sort(sort.Reverse(entries))
-	return entries, nil
 }
 
 func apiHelperGetApiDataCtx(r *http.Request) *ApiDataCtx {
@@ -262,123 +188,4 @@ func httpError(w http.ResponseWriter, code int, info string, err error) {
 	logErr.Printf("%s DetailError:%s\n", info, errDetails)
 	w.WriteHeader(code)
 	w.Write([]byte(info))
-}
-func currentExecutablePath() string {
-	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-	if err != nil {
-		logErr.Panicln(err.Error())
-	}
-	return dir
-}
-func parseDeployYaml(reader io.Reader) (DeployYAML, error) {
-	var err error
-	dec := yaml.NewDecoder(reader)
-	dep := DeployYAML{}
-	err = dec.Decode(&dep)
-	return dep, err
-}
-
-func executeTask(sessionID int64, yamlObject DeployYAML, ctx *ApiDataCtx) {
-	var namespace = yamlObject.Namespace
-	if len(namespace) == 0 {
-		namespace = fallbackDeploymentNamespace
-	}
-	logName := fmt.Sprintf("%s-%s.log", namespace, strconv.Itoa(int(sessionID)))
-	logFile, err := os.Create(path.Join(ctx.LogPath, logName))
-	defer logFile.Close()
-
-	taskInfoLog := log.New(logFile, "INFO: ", log.Ldate|log.Ltime|log.LUTC)
-	taskErrLog := log.New(logFile, "ERROR: ", log.Ldate|log.Ltime|log.LUTC)
-
-	if err != nil {
-		taskErrLog.Printf("Create log file %s \n", err.Error())
-		return
-	}
-
-	tokens, err := readTokenFile(ctx.TokenFile)
-	if err != nil {
-		taskErrLog.Printf("Read token file failed %s \n", err.Error())
-		return
-	}
-	if len(tokens) > 0 {
-		tst := yamlObject.AuthToken
-		var found bool
-		for _, t := range tokens {
-			if t == tst {
-				found = true
-				break
-			}
-		}
-		if !found {
-			taskErrLog.Println("Token authentication failed. Quit all tasks.")
-			return
-		} else {
-			taskInfoLog.Println("Token OK, will start tasks.")
-		}
-	}
-
-	for k, pkg := range yamlObject.Deploy {
-		if pkg.Skip {
-			taskInfoLog.Printf("Skip task %s \n", k)
-			continue
-		}
-		// todo: namespace validation and authorization
-		taskInfoLog.Printf("Start deploy task in yaml: %s \n", k)
-		tarPath := path.Join(ctx.PackagePath, pkg.Package)
-		if !filepath.IsAbs(tarPath) {
-			tarPath = filepath.Join(currentExecutablePath(), tarPath)
-		}
-		tardir := filepath.Dir(tarPath)
-		taskInfoLog.Printf("Step 1: \nStart tar decompress: %s \n", tarPath)
-		cmd := exec.Command("tar", "-xf", tarPath, "-C", tardir)
-		cmd.Stderr = logFile
-		cmd.Stdout = logFile
-		err = cmd.Run()
-		if err != nil {
-			taskErrLog.Printf("tar decompress err %s \n", err.Error())
-		} else {
-			taskInfoLog.Println("Completed tar decompress.")
-		}
-		scriptPath := path.Join(ctx.ScriptPath, pkg.Script)
-		if !filepath.IsAbs(scriptPath) {
-			scriptPath = filepath.Join(currentExecutablePath(), scriptPath)
-		}
-		// the script is predefined and the tar packages are also predefined.
-		taskInfoLog.Printf("Step 2: \nStart deployment script: %s \n", scriptPath)
-		cmd = exec.Command("sh", scriptPath)
-		cmd.Stderr = logFile
-		cmd.Stdout = logFile
-		err = cmd.Run()
-		if err != nil {
-			taskErrLog.Printf("Run script command err %s \n", err.Error())
-		} else {
-			taskInfoLog.Println("Script completed")
-		}
-		taskInfoLog.Printf("End of deploy task %s \n", k)
-	}
-}
-
-func readTokenFile(tokenFile string) ([]string, error) {
-	if !filepath.IsAbs(tokenFile) {
-		tokenFile = filepath.Join(currentExecutablePath(), tokenFile)
-	}
-
-	tokenFileChan <- true
-	defer func() {
-		<-tokenFileChan
-	}()
-
-	content, err := ioutil.ReadFile(tokenFile)
-	if err != nil {
-		return nil, err
-	}
-	tokens := []string{}
-	for _, rawline := range bytes.Split(content, []byte("\n")) {
-		token := string(rawline)
-		token = strings.TrimSpace(token)
-		if len(token) > 0 {
-			tokens = append(tokens, strings.TrimSpace(token))
-		}
-	}
-	return tokens, nil
 }
