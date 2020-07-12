@@ -150,13 +150,19 @@ func (*Api) getInfo(w http.ResponseWriter, r *http.Request) {
 	namespaceSession := routerVars["namespaceSession"]
 	r.URL.Query().Get("")
 	ctx := apiHelperGetApiDataCtx(r)
-	strs := strings.Split(namespaceSession, "-")
-	str1 := ""
-	if len(strs) > 1 {
-		str1 = strs[1]
+	splitter := strings.LastIndex(namespaceSession, "-")
+	var namespace, sessionId string
+
+	if splitter == -1 {
+		namespace = namespaceSession
+		sessionId = ""
+	} else {
+		namespace = namespaceSession[0:splitter]
+		sessionId = namespaceSession[splitter+1:]
 	}
-	if str1 == "" {
-		entries, err := fileUtl{}.listLogFile(ctx, strs[0])
+
+	if sessionId == "" {
+		entries, err := fileUtl{}.listLogFile(ctx, namespace)
 		if err != nil {
 			httpError(w, 500, "Can not read status", err)
 			return
@@ -167,7 +173,7 @@ func (*Api) getInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fcontent, err := fileUtl{}.readLogFile(ctx, strs[0], str1)
+	fcontent, err := fileUtl{}.readLogFile(ctx, namespace, sessionId)
 	if err != nil {
 		httpError(w, 500, "Can not read status", err)
 		return
