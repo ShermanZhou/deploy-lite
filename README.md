@@ -125,7 +125,6 @@ deploy:
     skip: false
 ```
 回应为%namespace%-%sessionid% -- 以此调用api得log
-The return is the %namespace%-%sessionid% -- need this to get the status of the deployment.
 - 3 namespace 空间名 and status 日志 api
 
 选空间名如'prod', 以此列出历史各日志 
