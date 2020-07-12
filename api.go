@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -159,6 +160,12 @@ func (*Api) getInfo(w http.ResponseWriter, r *http.Request) {
 	} else {
 		namespace = namespaceSession[0:splitter]
 		sessionId = namespaceSession[splitter+1:]
+		matched, _ := regexp.Match("^\\d+$", []byte(sessionId))
+		if !matched {
+			// last sessionId is not pure number, missing sessionId
+			namespace = namespaceSession
+			sessionId = ""
+		}
 	}
 
 	if sessionId == "" {
